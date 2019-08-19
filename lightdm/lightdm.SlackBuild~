@@ -1,11 +1,8 @@
 #!/bin/sh
  
-# Copyright 2010  Vincent Batts, vbatts@hashbangbash.com
-# Copyright 2010, 2011  Patrick J. Volkerding, Sebeka, Minnesota, USA
+# Copyright 2017  Ali Ahmadi, <idnux09@gmail.com>
 # All rights reserved.
 #
-# Heavily modified by Willy Sudiarto Raharjo for CSB project
-# Copyright 2014 Willy Sudiarto Raharjo <willysr@slackware-id.org>
 #
 # Redistribution and use of this script, with or without modification, is
 # permitted provided that the following conditions are met:
@@ -24,37 +21,26 @@
 #  OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 #  ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-SRCNAM=Linux-PAM
-PKGNAM=pam
+PKGNAM=lightdm
 VERSION=$(cat $PKGNAM.info | grep "VERSION" | cut -d = -f 2 | sed 's/"//g')
 BUILD=${BUILD:-1}
 TAG=${TAG:-_locutus}
-NUMJOBS=${NUMJOBS:--j7}
 
-# Automatically determine the architecture we're building on:
-MARCH=$( uname -m )
+NUMJOBS=${NUMJOBS:-" -j$(expr $(nproc) + 1) "}
+
 if [ -z "$ARCH" ]; then
-  case "$MARCH" in
-    i?86)    export ARCH=i586 ;;
-    armv7hl) export ARCH=$MARCH ;;
-    arm*)    export ARCH=arm ;;
-    # Unless $ARCH is already set, use uname -m for all other archs:
-    *)       export ARCH=$MARCH ;;
+  case "$( uname -m )" in
+    i?86) ARCH=i586 ;;
+    arm*) ARCH=arm ;;
+       *) ARCH=$( uname -m ) ;;
   esac
 fi
-
-NUMJOBS=${NUMJOBS:-" -j7 "}
-
-CWD=$(pwd)
-TMP=${TMP:-/tmp/build}
-PKG=$TMP/package-$PKGNAM
-OUTPUT=${OUTPUT:-/tmp}
 
 unset DOWNLOAD
 eval `cat $PKGNAM.info | grep "DOWNLOAD="`
 if [ ! -e $(basename $DOWNLOAD) ]; then
   echo "Downloading: $DOWNLOAD"
-  rm -f $SRCNAM-$VERSION.tar.*
+  rm -f $PKGNAM-$VERSION.tar.*
   curl -OLJ -C - $DOWNLOAD
 fi
 
@@ -72,14 +58,21 @@ else
   LIBDIRSUFFIX=""
 fi
 
+CWD=$(pwd)
+TMP=${TMP:-/tmp/build}
+PKG=$TMP/package-$PKGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
 set -e
 
 rm -rf $PKG
 mkdir -p $TMP $PKG $OUTPUT
 cd $TMP
-rm -rf $SRCNAM-$VERSION
-tar xvf $CWD/$SRCNAM-$VERSION.tar.?z*
-cd $SRCNAM-$VERSION
+rm -rf $PKGNAM-$VERSION
+tar xvf $CWD/$PKGNAM-$VERSION.tar.?z*
+cd $PKGNAM-$VERSION
+
+cat $CWD/lightdm-default-config.patch | patch -p1
 
 chown -R root:root .
 find -L . \
@@ -88,41 +81,66 @@ find -L . \
  \( -perm 666 -o -perm 664 -o -perm 640 -o -perm 600 -o -perm 444 \
   -o -perm 440 -o -perm 400 \) -exec chmod 644 {} \;
 
+# If we get here and don't have a lightdm user/group, add one.
+# Otherwise a few directories in the package will have wrong permissions.
+if ! grep -q "^lightdm:" /etc/passwd ; then
+  groupadd -fg 620 lightdm
+  useradd -c "Light Display Manager" -d /var/lib/lightdm -u 620 -g lightdm -s /sbin/nologin lightdm
+fi
+
 # Configure:
 CFLAGS="$SLKCFLAGS" \
 CXXFLAGS="$SLKCFLAGS" \
 ./configure \
-  --prefix=/ \
+  --prefix=/usr \
+  --libexecdir=/usr/lib/lightdm \
   --libdir=/usr/lib${LIBDIRSUFFIX} \
   --sysconfdir=/etc \
-  --includedir=/usr/include/security \
   --datarootdir=/usr/share \
   --localstatedir=/var \
+  --sbindir=/usr/bin \
   --mandir=/usr/man \
   --docdir=/usr/doc/$PKGNAM-$VERSION \
-  --enable-read-both-confs \
-  --disable-prelude \
-  --disable-regenerate-docu \
-  --disable-selinux \
+  --with-greeter-user=lightdm \
+  --with-greeter-session=lightdm-gtk-greeter \
+  --disable-liblightdm-qt \
+  --disable-liblightdm-qt5 \
+  --disable-static \
+  --disable-test \
   --build=$ARCH-slackware-linux || exit 1
 
 # Build and install:
-make $NUMJOBS
+make $NUMJOBS || make
 make install DESTDIR=$PKG
+
+cat $CWD/Xsession > $PKG/etc/lightdm/Xsession
+chmod +x $PKG/etc/lightdm/Xsession
+rm -rf $PKG/etc/init
+
+mkdir -p -m=755 $PKG/var/cache/lightdm
+mkdir -p -m=770 $PKG/var/lib/lightdm{,-data}
+mkdir -p -m=711 $PKG/var/log/lightdm
+chmod +t $PKG/var/{cache/lightdm,lib/lightdm{,-data}}
+chown lightdm:lightdm -R $PKG/var/lib/lightdm{,-data}
+chgrp lightdm $PKG/var/log/lightdm
+
+# apparmor package. Bug #494426
+ if [[ -d $PKG/etc/apparmor.d ]]; then
+   rm -r "$PKG/etc/apparmor.d" || die \
+			"Failed to remove apparmor profiles"
+ fi
+
+# PAM
+cat $CWD/lightdm.pam > $PKG/etc/pam.d/lightdm
+cat $CWD/lightdm-autologin.pam > $PKG/etc/pam.d/lightdm-autologin
+
+# PolicyKit
+mkdir -p -m750 $PKG/usr/share/polkit-1/rules.d
+chgrp polkitd $PKG/usr/share/polkit-1/rules.d
+cat $CWD/lightdm.rules > $PKG/usr/share/polkit-1/rules.d/lightdm.rules
 
 # Don't ship .la files:
 rm -f $PKG/{,usr/}lib${LIBDIRSUFFIX}/*.la
-
-
-# this is a pam helper, that can only be called from pam
-chown root:shadow $PKG/sbin/unix_chkpwd
-chmod g+s $PKG/sbin/unix_chkpwd
-
-# Add default pam.d config
-mkdir -p $PKG/etc/pam.d
-cp $CWD/pam.d/* $PKG/etc/pam.d/
-chown -R root:root $PKG/etc/pam.d
-chmod 644 $PKG/etc/pam.d/*
 
 # Strip binaries:
 find $PKG | xargs file | grep -e "executable" -e "shared object" \
@@ -147,8 +165,7 @@ fi
 # present, but listing them ensures that documentation that might appear and
 # disappear from version to version will not be missed.
 mkdir -p $PKG/usr/doc/$PKGNAM-$VERSION
-cp -a AUTHORS COPYING* Copyright NEWS README* $PKG/usr/doc/$PKGNAM-$VERSION
-rm -f $PKG/usr/doc/$PKGNAM-$VERSION/index.html
+cp -a COPYING* NEWS $PKG/usr/doc/$PKGNAM-$VERSION
 
 # If there's a ChangeLog, installing at least part of the recent history
 # is useful, but don't let it get totally out of control:
@@ -158,18 +175,12 @@ if [ -r ChangeLog ]; then
   touch -r ChangeLog $DOCSDIR/ChangeLog
 fi
 
-# fix some missing symlinks from old pam for compatibility
-cd $PKG/usr/lib${LIBDIRSUFFIX}/security
-ln -s pam_unix.so pam_unix_acct.so
-ln -s pam_unix.so pam_unix_auth.so
-ln -s pam_unix.so pam_unix_passwd.so
-ln -s pam_unix.so pam_unix_session.so
-
 mkdir -p $PKG/install
 cat $CWD/slack-desc > $PKG/install/slack-desc
+cat $CWD/doinst.sh > $PKG/install/doinst.sh
 
 cd $PKG
 /sbin/makepkg -p -l y -c n $OUTPUT/$PKGNAM-$VERSION-$ARCH-$BUILD$TAG.txz
 
 echo "Cleaning up build directory"
-cd $TMP; rm -rf $SRCNAM-$VERSION $PKG
+cd $TMP; rm -rf $PKGNAM-$VERSION $PKG
